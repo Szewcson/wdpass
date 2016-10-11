@@ -58,6 +58,16 @@ There are few options:
 Unlock a locked drive. You will be asked to enter the unlock password. If everything is fine device will be unlocked. (To lock a drive, unplug it.)
 
 ```
+-us, --unlock_with_saved_passwd Unlock with the password saved
+```
+Unlock using the saved password. If everything is fine device will be unlocked.
+
+```
+-sp, --save_passwd    Save password
+```
+When unlock password, it will save user password to passwd.bin, so you can use "-us" for next time to auto unlock.
+
+```
 -m, --mount           Enable mount point for an unlocked device
 ```
 After unlock, your operating system may still think that your device is a strange thing attached to its USB port and doesn't know how to manage it. This option forces the operating system to rescan the device and handle it as a normal external USB harddrive. This flag can be combined with `-u`.

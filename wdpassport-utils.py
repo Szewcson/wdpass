@@ -194,7 +194,7 @@ def mk_password_block(passwd, iteration, salt):
 	return password
 
 ## Unlock the device
-def unlock():
+def unlock(save_passwd, unlock_with_saved_passwd):
 	global device_name
 
 	## Device should be in the correct state 
@@ -207,15 +207,28 @@ def unlock():
 		sys.exit(1)
 	
 	## Get password from user
-	passwd = getpass.getpass("[wdpassport] password for {}: ".format(device_name))
+	if not unlock_with_saved_passwd:
+		print(question("Insert password to Unlock the device"))
+		passwd = getpass.getpass("[wdpassport] password for {}: ".format(device_name))
+		
+		hash_parameters = read_handy_store_block1()
+		if not hash_parameters:
+			print(fail("Key hash parameters are not valid."))
+			sys.exit(1)
+		iteration, salt, hint = hash_parameters
+		
+		pwd_hashed = mk_password_block(passwd, iteration, salt)
 	
-	hash_parameters = read_handy_store_block1()
-	if not hash_parameters:
-		print(fail("Key hash parameters are not valid."))
-		sys.exit(1)
-	iteration, salt, hint = hash_parameters
-	
-	pwd_hashed = mk_password_block(passwd, iteration, salt)
+	## Get password from saved file
+    	else:
+		print(success("Unlock use saved password"))
+		passwd_bin = open("passwd.bin", "r")
+		pwd_hashed = pickle.load(passwd_bin)
+
+    	if save_passwd:
+		passwd_bin = open("passwd.bin", "w")
+		pickle.dump(pwd_hashed, passwd_bin)
+
 	pw_block = [0x45,0x00,0x00,0x00,0x00,0x00]
 	pwblen = status["PasswordLength"]
 	for c in htons(pwblen):
@@ -379,8 +392,10 @@ def main(argv):
 
 	parser = argparse.ArgumentParser()
 	parser.add_argument("-u", "--unlock", required=False, action="store_true", help="Unlock")
+	parser.add_argument("-us", "--unlock_with_saved_passwd", required=False, action="store_true", help="Unlock with saved passwd")
 	parser.add_argument("-m", "--mount", required=False, action="store_true", help="Enable mount point for an unlocked device")
 	parser.add_argument("-c", "--change_passwd", required=False, action="store_true", help="Change (or disable) password")
+	parser.add_argument("-sp", "--save_passwd", required=False, action="store_true", help="Save passwd")
 	parser.add_argument("-e", "--erase", required=False, action="store_true", help="Secure erase device")
 	parser.add_argument("-d", "--device", dest="device", required=False, help="Force device path (ex. /dev/sdb). Usually you don't need this option.")
 
@@ -437,7 +452,9 @@ def main(argv):
 
 	## Perform actions.
 	if args.unlock:
-		unlock()
+		unlock(args.save_passwd, False)
+    	if args.unlock_with_saved_passwd:
+		unlock(args.save_passwd, True)
 	if args.change_passwd:
 		print("Changing password for {}...".format(device_name))
 		change_password()

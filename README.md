@@ -1,3 +1,8 @@
+[![Downloads](https://img.shields.io/pypi/dw/wdpass.svg)](https://pypi.org/project/wdpass/)
+[![Published Version](https://img.shields.io/pypi/v/wdpass.svg)](https://pypi.org/project/wdpass/)
+![GitHub Release](https://img.shields.io/github/release/7aman/wdpass.svg?label=repo%20version)
+[![License: MIT](https://img.shields.io/github/license/7aman/wdpass.svg)](https://github.com/7aman/wdpass/blob/main/LICENSE)
+
 # wdpass
 
 WD Passport Ultra Complete Utilities for Linux.
@@ -35,7 +40,7 @@ For example on Ubuntu:
 ```shell
 sudo apt install lsscsi python3-dev
 sudo python3 -m pip install https://github.com/tvladyslav/py3_sg/archive/master.zip
-sudo python3 -m pip install https://github.com/7aman/wdpass/archive/master.zip
+sudo python3 -m pip install https://github.com/7aman/wdpass/archive/main.zip
 ```
 
 ## Usage

@@ -4,6 +4,7 @@
     "dictionaryDefinitions": [],
     "dictionaries": [],
     "words": [
+        "bdist",
         "derekhe",
         "devel",
         "distro",
@@ -12,6 +13,8 @@
         "htonl",
         "htons",
         "pwblen",
+        "sdist",
+        "setuptools",
         "tvladyslav",
         "Unlocker",
         "urandom",

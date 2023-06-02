@@ -10,15 +10,14 @@ import argparse
 import subprocess
 
 try:
-    import py_sg
+    import py3_sg
 except ImportError as e:
     print(e)
-    print("You need to install the 'py_sg' module.")
-    print("More info: https://github.com/crypto-universe/py3_sg")
+    print("You need to install the 'py3_sg' module.")
+    print("More info: https://github.com/tvladyslav/py3_sg")
     sys.exit(1)
 
 BLOCK_SIZE = 512
-HANDSTORESECURITYBLOCK = 1
 dev = None
 
 
@@ -163,7 +162,7 @@ def read_handy_store(page):
     for c in htonl(page):
         cdb[i] = c
         i += 1
-    return py_sg.read_as_bin_str(dev, _scsi_pack_cdb(cdb), BLOCK_SIZE)
+    return py3_sg.read_as_bin_str(dev, _scsi_pack_cdb(cdb), BLOCK_SIZE)
 
 
 def hsb_checksum(data):
@@ -186,7 +185,7 @@ def get_encryption_status():
             0x02 => Unlocked
             0x06 => Locked, unlock blocked
             0x07 => No keys
-        CurrentChiperID
+        CurrentCipherID
             0x10 =>	AES_128_ECB
             0x12 =>	AES_128_CBC
             0x18 =>	AES_128_XTS
@@ -197,11 +196,11 @@ def get_encryption_status():
         KeyResetEnabler (4 bytes that change every time)
     '''
     cdb = [0xC0, 0x45, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00]
-    data = py_sg.read_as_bin_str(dev, _scsi_pack_cdb(cdb), BLOCK_SIZE)
+    data = py3_sg.read_as_bin_str(dev, _scsi_pack_cdb(cdb), BLOCK_SIZE)
     if data[0] != 0x45:
         fail(f"Wrong encryption status signature {data[0]:#x}")
         sys.exit(1)
-    # (SecurityStatus, CurrentChiperID, KeyResetEnabler)
+    # (SecurityStatus, CurrentCipherID, KeyResetEnabler)
     return (data[3], data[4], data[8:12])
 
 
@@ -293,7 +292,7 @@ def unlock(save_passwd, unlock_with_saved_passwd):
     cdb[8] = pwblen + 8
 
     try:
-        py_sg.write(dev, _scsi_pack_cdb(cdb),
+        py3_sg.write(dev, _scsi_pack_cdb(cdb),
                     _scsi_pack_cdb(pw_block) + pwd_hashed)
         success("Device unlocked.")
     except:
@@ -364,7 +363,7 @@ def change_password():
 
     cdb[8] = 8 + 2 * pwblen
     try:
-        py_sg.write(dev, _scsi_pack_cdb(cdb), _scsi_pack_cdb(
+        py3_sg.write(dev, _scsi_pack_cdb(cdb), _scsi_pack_cdb(
             pw_block) + old_passwd_hashed + new_passwd_hashed)
         success("Password changed.")
     except:
@@ -398,13 +397,13 @@ def secure_erase(cipher_id=0):
         fail(f"Unsupported cipher {cipher_id:#x}")
         sys.exit(1)
 
-    # Set the actual lenght of pw_block (8 bytes + pwblen pseudorandom data)
+    # Set the actual length of pw_block (8 bytes + pwblen pseudorandom data)
     cdb[8] = pwblen + 8
     # Fill pw_block with random data
     for rand_byte in os.urandom(pwblen):
         pw_block.append(rand_byte)
 
-    # key_reset needs to be retrieved immidiatly before the reset request
+    # key_reset needs to be retrieved immediately before the reset request
     key_reset = get_encryption_status()[2]
     i = 2
     for c in key_reset:
@@ -412,7 +411,7 @@ def secure_erase(cipher_id=0):
         i += 1
 
     try:
-        py_sg.write(dev, _scsi_pack_cdb(cdb), _scsi_pack_cdb(pw_block))
+        py3_sg.write(dev, _scsi_pack_cdb(cdb), _scsi_pack_cdb(pw_block))
         success(
             "Device erased. You need to create a new partition on the device (Hint: fdisk and mkfs)")
     except:
@@ -479,7 +478,7 @@ def enable_mount(device):
         )
 
         success(
-            "Now depending on your system you can mount your device or it will be automagically mounted.")
+            "Now depending on your system you can mount your device or it will be automatically mounted.")
     else:
         fail("Device needs to be unlocked in order to mount it.")
 
@@ -495,7 +494,7 @@ def get_device(device):
             stdout=subprocess.PIPE)
 
         if int(p.stdout.read().rstrip()) > 1:
-            fail("Multiple occurences of 'My Passport' detected.")
+            fail("Multiple occurrences of 'My Passport' detected.")
             fail("You should specify a device manually (with -d option).")
             sys.exit(1)
 

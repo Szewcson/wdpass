@@ -1,0 +1,26 @@
+{
+    "version": "0.2",
+    "ignorePaths": [],
+    "dictionaryDefinitions": [],
+    "dictionaries": [],
+    "words": [
+        "derekhe",
+        "devel",
+        "distro",
+        "fdisk",
+        "geteuid",
+        "htonl",
+        "htons",
+        "pwblen",
+        "tvladyslav",
+        "Unlocker",
+        "urandom",
+        "wdpass",
+        "wdpassport",
+        "Zaman"
+    ],
+    "ignoreWords": [
+        "Lenski"
+    ],
+    "import": []
+}

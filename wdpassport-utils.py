@@ -9,6 +9,9 @@ from hashlib import sha256
 from random import randint
 import argparse
 import pyudev
+import contextlib
+import base64
+import secretstorage
 
 try:
 	import py3_sg as py_sg
@@ -20,6 +23,8 @@ BLOCK_SIZE = 512
 HANDSTORESECURITYBLOCK = 1
 dev = None
 device_name = None
+device_model = None
+device_serial = None
 
 ## Print fail message with red leading characters
 def fail(str):
@@ -193,9 +198,88 @@ def mk_password_block(passwd, iteration, salt):
 
 	return password
 
+def become_user():
+	# become user
+	uid = os.environ["SUDO_UID"]
+	os.seteuid(int(uid))
+
+	# set the dbus address
+	os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+
+
+def become_root_again():
+	# become root again
+	os.seteuid(0)
+
+def get_password_from_secret_service(device_name):
+	become_user()
+	try:
+		with contextlib.closing(secretstorage.dbus_init()) as con:
+			col = secretstorage.get_default_collection(con)
+			if col.is_locked():
+				col.unlock()
+			
+			items = col.search_items({
+				'application': 'wdpassport-utils', 
+				'device': device_name
+			})
+			
+			for item in items:
+				if item.get_label().startswith('WD Passport'):
+					if item.is_locked():
+						item.unlock()
+					password = base64.b64decode(item.get_secret())
+					become_root_again()
+					return password
+			
+			print(fail("No password found"))
+			become_root_again()
+			sys.exit(1)
+		
+	except Exception as e:
+		print(fail("Secret Service failed: {}".format(e)))
+		become_root_again()
+		sys.exit(1)
+
+def save_password_to_secret_service(device_name, password):
+	become_user()
+	try:
+		with contextlib.closing(secretstorage.dbus_init()) as con:
+			col = secretstorage.get_default_collection(con)
+			if col.is_locked():
+				col.unlock()
+			
+			attributes = {
+				'application': 'wdpassport-utils', 
+				'device': device_name
+			}
+			
+			items = list(col.search_items(attributes))
+			
+			encoded = base64.b64encode(password)
+			label = f"WD Passport: {device_name.replace("_", " ")}"
+			
+			if items:
+				item = items[0]
+				if item.is_locked():
+					item.unlock()
+				item.set_secret(encoded)
+				print(success("Updated password for {}".format(device_name)))
+			else:
+				col.create_item(label, attributes, encoded, replace=True)
+				print(success("Saved password for {}".format(device_name)))
+		become_root_again()
+
+	except Exception as e:
+		become_root_again()
+		print(fail("Can't save password to Secret Service: {}".format(e)))
+	
+
 ## Unlock the device
 def unlock(save_passwd, unlock_with_saved_passwd):
 	global device_name
+	global device_model
+	global device_serial
 
 	## Device should be in the correct state 
 	status = get_encryption_status()
@@ -219,15 +303,13 @@ def unlock(save_passwd, unlock_with_saved_passwd):
 		
 		pwd_hashed = mk_password_block(passwd, iteration, salt)
 	
-	## Get password from saved file
-    	else:
+	## Get password from secrt service
+	else:
 		print(success("Unlock use saved password"))
-		passwd_bin = open("passwd.bin", "r")
-		pwd_hashed = pickle.load(passwd_bin)
+		pwd_hashed = get_password_from_secret_service(f"{device_model}_{device_serial}")
 
-    	if save_passwd:
-		passwd_bin = open("passwd.bin", "w")
-		pickle.dump(pwd_hashed, passwd_bin)
+	if save_passwd:
+		save_password_to_secret_service(f"{device_model}_{device_serial}", pwd_hashed)
 
 	pw_block = [0x45,0x00,0x00,0x00,0x00,0x00]
 	pwblen = status["PasswordLength"]
@@ -389,6 +471,8 @@ def enable_mount(device):
 def main(argv): 
 	global dev
 	global device_name
+	global device_model
+	global device_serial
 
 	parser = argparse.ArgumentParser()
 	parser.add_argument("-u", "--unlock", required=False, action="store_true", help="Unlock")
@@ -413,13 +497,15 @@ def main(argv):
 		if args.device and disk_device.device_node != args.device:
 			continue
 
-		# Scan parent for device name.
-		device = disk_device
-		while device is not None:
-			if "ID_SERIAL" in device:
-				if device.properties["ID_SERIAL"].startswith("Western_Digital_My_"):
-					passport_devices.append(disk_device)
-			device = device.parent
+		# skip virtul CD-ROM with windows unlocker
+		if'ID_CDROM_MEDIA' not in disk_device.properties:
+			# Scan parent for device name.
+			device = disk_device
+			while device is not None:
+				if "ID_SERIAL" in device:
+					if device.properties["ID_SERIAL"].startswith("Western_Digital_My_"):
+						 passport_devices.append(disk_device)
+				device = device.parent
 
 	if len(passport_devices) == 0:
 		print(fail("No Western Digital Passport device found."))
@@ -430,6 +516,9 @@ def main(argv):
 
 	device = passport_devices[0]
 	device_name = device.device_node
+	device_model = device.properties["ID_MODEL"]
+	device_serial = device.properties["ID_SERIAL_SHORT"]
+
 
 	## Open the device.
 	try:
@@ -443,8 +532,11 @@ def main(argv):
 		print(fail("Something wrong opening {}".format(device_name)))
 		sys.exit(1)
 
+	if args.save_passwd and not args.unlock:
+		  parser.error("--save_passwd (-sp) requires --unlock (-u)")
+
 	## Report device state if no specific command is given.
-	if not args.unlock and not args.change_passwd and not args.erase and not args.mount:
+	if not args.unlock and not args.change_passwd and not args.erase and not args.mount and not args.unlock_with_saved_passwd:
 		status = get_encryption_status()
 		print("Device: %s" % device_name)
 		print("Security status: %s" % sec_status_to_str(status["Locked"]))
@@ -453,7 +545,7 @@ def main(argv):
 	## Perform actions.
 	if args.unlock:
 		unlock(args.save_passwd, False)
-    	if args.unlock_with_saved_passwd:
+	if args.unlock_with_saved_passwd:
 		unlock(args.save_passwd, True)
 	if args.change_passwd:
 		print("Changing password for {}...".format(device_name))

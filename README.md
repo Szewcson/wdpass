@@ -65,7 +65,7 @@ Unlock using the saved password. If everything is fine device will be unlocked.
 ```
 -sp, --save_passwd    Save password
 ```
-When unlock password, it will save user password to passwd.bin, so you can use "-us" for next time to auto unlock.
+When unlock password, it will save user password to SecretStorage, so you can use "-us" for next time to auto unlock.
 
 ```
 -m, --mount           Enable mount point for an unlocked device

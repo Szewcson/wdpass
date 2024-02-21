@@ -10,6 +10,7 @@ setup(name='wdpassport_utils',
       install_requires=[
         'pyudev',
         'py3_sg @ git+https://github.com/crypto-universe/py_sg',
+        'SecretStorage >= 3.3.3',
       ],
       scripts=['wdpassport-utils.py'],
       )

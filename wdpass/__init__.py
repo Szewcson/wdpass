@@ -8,6 +8,8 @@ from hashlib import sha256
 from random import randint
 import argparse
 import subprocess
+import contextlib
+import base64
 
 try:
     import py3_sg
@@ -15,6 +17,14 @@ except ImportError as e:
     print(e)
     print("You need to install the 'py3_sg' module.")
     print("More info: https://github.com/tvladyslav/py3_sg")
+    sys.exit(1)
+
+try:
+    import secretstorage
+except ImportError as e:
+    print(e)
+    print("You need to install the 'SecretStorage' module.")
+    print("More info: https://github.com/mitya57/secretstorage")
     sys.exit(1)
 
 BLOCK_SIZE = 512
@@ -247,7 +257,53 @@ def mk_password_block(passwd, iteration, salt):
     return password
 
 
-def unlock(save_passwd, unlock_with_saved_passwd):
+def become_user():
+    # become user
+    uid = os.environ["SUDO_UID"]
+    os.seteuid(int(uid))
+
+    # set the dbus address
+    os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+
+
+def become_root_again():
+    # become root again
+    os.seteuid(0)
+
+
+def get_password_from_secret_service(device_name):
+    become_user()
+    with contextlib.closing(secretstorage.dbus_init()) as con:
+        col = secretstorage.get_default_collection(con)
+        wdpass_passwords = col.search_items({'application': 'wdpass'})
+        for item in wdpass_passwords:
+            if item.get_label() == f'Encryption passphrase for {device_name.decode()}':
+                if item.is_locked():
+                   item.unlock()
+                readed_pass = base64.b64decode(item.get_secret())
+                become_root_again();
+                return readed_pass
+        else:
+            fail('failed to read from keyring')
+            become_root_again();
+            return b''
+
+
+def seve_password_to_secret_service(device_name, password):
+    become_user()
+    with contextlib.closing(secretstorage.dbus_init()) as con:
+        col = secretstorage.get_default_collection(con)
+        attributes = {'application': 'wdpass'}
+        encoded = base64.b64encode(password)
+        try:
+            item = col.create_item(f'Encryption passphrase for {device_name.decode()}', attributes, encoded.decode())
+        except:
+            fail("Can't save password to Secret Service agent")
+        finally:
+            become_root_again();
+
+
+def unlock(device, save_passwd, unlock_with_saved_passwd):
     '''Unlock the device'''
     cdb = [0xC1, 0xE1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28, 0x00]
     sec_status, cipher_id, _ = get_encryption_status()
@@ -278,12 +334,10 @@ def unlock(save_passwd, unlock_with_saved_passwd):
         pwd_hashed = mk_password_block(passwd, iteration, salt)
     else:
         success("Unlock use saved password")
-        passwd_bin = open("passwd.bin", "r+b")
-        pwd_hashed = pickle.load(passwd_bin)
+        pwd_hashed = get_password_from_secret_service(get_device_info(device)[3])
 
     if save_passwd:
-        passwd_bin = open("passwd.bin", "w+b")
-        pickle.dump(pwd_hashed, passwd_bin)
+        seve_password_to_secret_service(get_device_info(device)[3], pwd_hashed)
 
     pw_block = [0x45, 0x00, 0x00, 0x00, 0x00, 0x00]
     for c in htons(pwblen):
@@ -453,7 +507,13 @@ def get_device_info(device=None):
         stdout=subprocess.PIPE
     ).stdout.read().rstrip()
 
-    return [complete_path, relative_path, host_number]
+    dev_name = subprocess.Popen(
+        f"sudo lsscsi | grep {grep_string} | cut -d ']' -f 2 | cut -d '/' -f 1 | tr -s ' ' | sed -e 's/^[[:space:]]*//'",
+        shell=True,
+        stdout=subprocess.PIPE
+    ).stdout.read().rstrip()
+
+    return [complete_path, relative_path, host_number, dev_name]
 
 
 def enable_mount(device):
@@ -524,10 +584,10 @@ def main():
         print(f"\tSecurity status: {sec_status_to_str(status)}")
         print(f"\tEncryption type: {cipher_id_to_str(cipher_id)}")
     if args.unlock:
-        unlock(args.save_passwd, False)
+        unlock(DEVICE, args.save_passwd, False)
 
     if args.unlock_with_saved_passwd:
-        unlock(args.save_passwd, True)
+        unlock(DEVICE, args.save_passwd, True)
 
     if args.change_passwd:
         change_password()

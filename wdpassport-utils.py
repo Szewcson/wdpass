@@ -3,6 +3,8 @@ import sys
 import os
 import struct
 import getpass
+import json
+import pwd
 import random
 import string
 from hashlib import sha256
@@ -198,81 +200,246 @@ def mk_password_block(passwd, iteration, salt):
 
 	return password
 
-def become_user():
-	# become user
-	uid = os.environ["SUDO_UID"]
-	os.seteuid(int(uid))
+def _resolve_secret_service_uid():
+	sudo_uid = os.environ.get("SUDO_UID")
+	if sudo_uid is not None:
+		try:
+			return int(sudo_uid)
+		except ValueError:
+			pass
 
-	# set the dbus address
-	os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+	pkexec_uid = os.environ.get("PKEXEC_UID")
+	if pkexec_uid is not None:
+		try:
+			return int(pkexec_uid)
+		except ValueError:
+			pass
+
+	return os.getuid()
 
 
-def become_root_again():
-	# become root again
-	os.seteuid(0)
+def _session_bus_path(uid):
+	return f"/run/user/{uid}/bus"
 
-def get_password_from_secret_service(device_name):
-	become_user()
+
+def _session_bus_address(uid):
+	return f"unix:path={_session_bus_path(uid)}"
+
+
+def _session_bus_path_from_address(address):
+	prefix = "unix:path="
+	if address.startswith(prefix):
+		return address[len(prefix):]
+	return None
+
+def _secret_service_unavailable_message(uid):
+	return (
+		f"Secret Service is not reachable because no session bus was found for uid {uid}. "
+		"Saved-password unlock will not work until a user session bus is available."
+	)
+
+
+def _configure_secret_service_bus(uid):
+	bus_address = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+	if bus_address:
+		bus_path = _session_bus_path_from_address(bus_address)
+		if bus_path is not None and not os.path.exists(bus_path):
+			raise RuntimeError(_secret_service_unavailable_message(uid))
+		return
+
+	if os.path.exists(_session_bus_path(uid)):
+		os.environ["DBUS_SESSION_BUS_ADDRESS"] = _session_bus_address(uid)
+	else:
+		raise RuntimeError(_secret_service_unavailable_message(uid))
+
+
+def _resolve_secret_service_user():
+	uid = _resolve_secret_service_uid()
+	try:
+		return pwd.getpwuid(uid)
+	except KeyError as e:
+		raise RuntimeError(f"Unable to resolve account information for uid {uid}.") from e
+
+
+def _prepare_secret_service_process():
+	user = _resolve_secret_service_user()
+	uid = user.pw_uid
+	runtime_dir = f"/run/user/{uid}"
+
+	if os.geteuid() == 0:
+		os.initgroups(user.pw_name, user.pw_gid)
+		os.setgid(user.pw_gid)
+		os.setuid(uid)
+	elif os.geteuid() != uid:
+		raise RuntimeError(
+			f"Secret Service access requires uid {uid}, but the helper is running as uid {os.geteuid()}."
+		)
+
+	os.environ["HOME"] = user.pw_dir
+	os.environ["LOGNAME"] = user.pw_name
+	os.environ["USER"] = user.pw_name
+	if os.path.exists(runtime_dir):
+		os.environ["XDG_RUNTIME_DIR"] = runtime_dir
+
+	_configure_secret_service_bus(uid)
+
+	return user
+
+def _run_secret_service_action_impl(action, device_name, password=None):
+	_prepare_secret_service_process()
+
 	try:
 		with contextlib.closing(secretstorage.dbus_init()) as con:
 			col = secretstorage.get_default_collection(con)
 			if col.is_locked():
 				col.unlock()
-			
-			items = col.search_items({
-				'application': 'wdpassport-utils', 
-				'device': device_name
-			})
-			
-			for item in items:
-				if item.get_label().startswith('WD Passport'):
+
+			attributes = {
+				'application': 'wdpassport-utils',
+				'device': device_name,
+			}
+
+			if action == "get":
+				items = col.search_items(attributes)
+
+				for item in items:
+					if item.get_label().startswith('WD Passport'):
+						if item.is_locked():
+							item.unlock()
+						stored_password = base64.b64decode(item.get_secret())
+						return {
+							"ok": True,
+							"password": base64.b64encode(stored_password).decode("ascii"),
+						}
+
+				return {"ok": False, "message": "No password found"}
+
+			if action == "save":
+				items = list(col.search_items(attributes))
+				encoded = base64.b64encode(password)
+				label = f"WD Passport: {device_name.replace('_', ' ')}"
+
+				if items:
+					item = items[0]
 					if item.is_locked():
 						item.unlock()
-					password = base64.b64decode(item.get_secret())
-					become_root_again()
-					return password
-			
-			print(fail("No password found"))
-			become_root_again()
-			sys.exit(1)
-		
+					item.set_secret(encoded)
+					return {"ok": True, "message": f"Updated password for {device_name}"}
+
+				col.create_item(label, attributes, encoded, replace=True)
+				return {"ok": True, "message": f"Saved password for {device_name}"}
+
+			raise RuntimeError(f"Unsupported Secret Service action: {action}")
 	except Exception as e:
-		print(fail("Secret Service failed: {}".format(e)))
-		become_root_again()
+		return {"ok": False, "message": f"Secret Service failed: {e}"}
+
+
+def _run_secret_service_action(action, device_name, password=None):
+	request_read_fd, request_write_fd = os.pipe()
+	response_read_fd, response_write_fd = os.pipe()
+	pid = os.fork()
+
+	if pid == 0:
+		try:
+			_prepare_secret_service_process()
+			os.close(request_write_fd)
+			os.close(response_read_fd)
+			os.dup2(request_read_fd, sys.stdin.fileno())
+			os.dup2(response_write_fd, sys.stdout.fileno())
+			os.close(request_read_fd)
+			os.close(response_write_fd)
+			os.execv(sys.executable, [
+				sys.executable,
+				os.path.abspath(__file__),
+				"--secret-service-helper",
+			])
+		except Exception as e:
+			response = {"ok": False, "message": f"Secret Service failed: {e}"}
+			os.close(request_read_fd)
+			os.close(request_write_fd)
+			os.close(response_read_fd)
+			with os.fdopen(response_write_fd, "w") as pipe:
+				json.dump(response, pipe)
+			os._exit(1)
+
+	os.close(request_read_fd)
+	os.close(response_write_fd)
+	request = {
+		"action": action,
+		"device_name": device_name,
+	}
+	if password is not None:
+		request["password_b64"] = base64.b64encode(password).decode("ascii")
+
+	with os.fdopen(request_write_fd, "w") as pipe:
+		json.dump(request, pipe)
+
+	with os.fdopen(response_read_fd) as pipe:
+		payload = pipe.read()
+
+	_, status = os.waitpid(pid, 0)
+	if not payload:
+		return {"ok": False, "message": "Secret Service helper exited without a response."}
+
+	try:
+		response = json.loads(payload)
+	except json.JSONDecodeError:
+		return {"ok": False, "message": "Secret Service helper returned an invalid response."}
+
+	if os.WIFSIGNALED(status):
+		return {
+			"ok": False,
+			"message": f"Secret Service helper terminated with signal {os.WTERMSIG(status)}.",
+		}
+
+	if os.WIFEXITED(status) and os.WEXITSTATUS(status) != 0 and response.get("ok", False):
+		return {"ok": False, "message": "Secret Service helper exited unexpectedly."}
+
+	return response
+
+def _run_secret_service_helper():
+	try:
+		request = json.load(sys.stdin)
+	except json.JSONDecodeError as e:
+		print(json.dumps({"ok": False, "message": f"Invalid Secret Service helper request: {e}"}))
+		return
+
+	action = request.get("action")
+	device_name = request.get("device_name")
+	password = None
+
+	if not action or not device_name:
+		print(json.dumps({
+			"ok": False,
+			"message": "Invalid Secret Service helper request: missing action or device_name.",
+		}))
+		return
+
+	password_b64 = request.get("password_b64")
+	if password_b64 is not None:
+		try:
+			password = base64.b64decode(password_b64)
+		except Exception as e:
+			print(json.dumps({"ok": False, "message": f"Invalid Secret Service helper password: {e}"}))
+			return
+
+	print(json.dumps(_run_secret_service_action_impl(action, device_name, password)))
+
+
+def get_password_from_secret_service(device_name):
+	response = _run_secret_service_action("get", device_name)
+	if not response.get("ok"):
+		print(fail(response["message"]))
 		sys.exit(1)
 
-def save_password_to_secret_service(device_name, password):
-	become_user()
-	try:
-		with contextlib.closing(secretstorage.dbus_init()) as con:
-			col = secretstorage.get_default_collection(con)
-			if col.is_locked():
-				col.unlock()
-			
-			attributes = {
-				'application': 'wdpassport-utils', 
-				'device': device_name
-			}
-			
-			items = list(col.search_items(attributes))
-			
-			encoded = base64.b64encode(password)
-			label = f"WD Passport: {device_name.replace("_", " ")}"
-			
-			if items:
-				item = items[0]
-				if item.is_locked():
-					item.unlock()
-				item.set_secret(encoded)
-				print(success("Updated password for {}".format(device_name)))
-			else:
-				col.create_item(label, attributes, encoded, replace=True)
-				print(success("Saved password for {}".format(device_name)))
-		become_root_again()
+	return base64.b64decode(response["password"])
 
-	except Exception as e:
-		become_root_again()
-		print(fail("Can't save password to Secret Service: {}".format(e)))
+def save_password_to_secret_service(device_name, password):
+	response = _run_secret_service_action("save", device_name, password)
+	if response.get("ok"):
+		print(success(response["message"]))
+	else:
+		print(fail(response["message"]))
 	
 
 ## Unlock the device
@@ -308,9 +475,6 @@ def unlock(save_passwd, unlock_with_saved_passwd):
 		print(success("Unlock use saved password"))
 		pwd_hashed = get_password_from_secret_service(f"{device_model}_{device_serial}")
 
-	if save_passwd:
-		save_password_to_secret_service(f"{device_model}_{device_serial}", pwd_hashed)
-
 	pw_block = [0x45,0x00,0x00,0x00,0x00,0x00]
 	pwblen = status["PasswordLength"]
 	for c in htons(pwblen):
@@ -327,7 +491,10 @@ def unlock(save_passwd, unlock_with_saved_passwd):
 	except:
 		## Wrong password or something bad is happened.
 		print(fail("Wrong password."))
-		pass
+		return
+
+	if save_passwd:
+		save_password_to_secret_service(f"{device_model}_{device_serial}", pwd_hashed)
 
 ## Change device password
 ## If the new password is empty the device state change and become "0x00 - No lock" meaning encryption is no more used.
@@ -482,8 +649,13 @@ def main(argv):
 	parser.add_argument("-sp", "--save_passwd", required=False, action="store_true", help="Save passwd")
 	parser.add_argument("-e", "--erase", required=False, action="store_true", help="Secure erase device")
 	parser.add_argument("-d", "--device", dest="device", required=False, help="Force device path (ex. /dev/sdb). Usually you don't need this option.")
+	parser.add_argument("--secret-service-helper", dest="secret_service_helper", action="store_true", help=argparse.SUPPRESS)
 
 	args = parser.parse_args()
+
+	if args.secret_service_helper:
+		_run_secret_service_helper()
+		return
 	
 	if len(sys.argv) == 1:
 		args.status = True
